@@ -833,7 +833,7 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
     prefer = prefer or {}
     results = []
 
-    def rec(frag: list, assigned: dict, conds: list):
+    def rec(frag: list, assigned: dict, conds: list, taken: list):
         if len(results) >= limit:
             return
         idx = -1
@@ -844,7 +844,7 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
                 node = item
                 break
         if node is None:
-            results.append((conds, assigned))
+            results.append((conds, assigned, taken))
             return
         rest = frag[idx + 1:]
         name = node.name
@@ -861,7 +861,8 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
             else:
                 branch = route_select(node, _str_value(v))
             if branch is not None:
-                rec(branch.message + rest, assigned, conds)
+                rec(branch.message + rest, assigned, conds,
+                    taken + [(node.node_id, branch.selector)])
             return
         for b in node.branches:
             use_prefer = name in prefer and \
@@ -873,9 +874,10 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
                 continue
             new_assigned = dict(assigned)
             new_assigned[name] = rep
-            rec(b.message + rest, new_assigned, conds + [cond])
+            rec(b.message + rest, new_assigned, conds + [cond],
+                taken + [(node.node_id, b.selector)])
 
-    rec(parts, dict(base_vars), [])
+    rec(parts, dict(base_vars), [], [])
     return results
 
 
@@ -959,7 +961,7 @@ def analyze(template: str, locale: str, variables: dict) -> dict:
     total, capped = count_paths(parts, {}, locale, cap=10000)
     truncated = total > MAX_PATHS
     paths = []
-    for conds, assigned in iter_paths(parts, {}, locale, MAX_PATHS, prefer=variables):
+    for conds, assigned, taken in iter_paths(parts, {}, locale, MAX_PATHS, prefer=variables):
         render_vars = dict(variables)
         render_vars.update(assigned)
         pctx = RenderCtx(render_vars, locale)
@@ -967,6 +969,7 @@ def analyze(template: str, locale: str, variables: dict) -> dict:
         covered = (not ctx.incomplete) and pctx.taken == ctx.taken
         paths.append({
             "id": len(paths) + 1,
+            "key": path_key(taken),
             "conditions": conds,
             "output": output,
             "covered": covered,
@@ -994,5 +997,161 @@ def analyze(template: str, locale: str, variables: dict) -> dict:
             "truncated": truncated or capped,
             "max_paths": MAX_PATHS,
             "coverage_available": not ctx.incomplete,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 场景集批量回归
+# ---------------------------------------------------------------------------
+
+MAX_SCENARIOS = 100
+MAX_SCENARIO_NAME = 80
+
+
+def path_key(taken: list[tuple[str, str]]) -> str:
+    """把一条路径经过的 (node_id, selector) 序列转成稳定标识。
+
+    同一份模板下该标识唯一对应一条分支路径，跨场景（不同 locale / 变量）
+    可直接据此合并覆盖状态。
+    """
+    return "|".join(f"{nid}:{sel}" for nid, sel in taken)
+
+
+def _normalize_scenario(raw, index):
+    """校验并归一化单个场景，返回 (scenario_dict, error_message_or_None)。"""
+    if not isinstance(raw, dict):
+        return None, f"第 {index + 1} 个场景必须是对象"
+    name = str(raw.get("name") or f"场景 {index + 1}")
+    name = name.strip()[:MAX_SCENARIO_NAME] or f"场景 {index + 1}"
+    locale = raw.get("locale", "en")
+    if not isinstance(locale, str) or not locale.strip():
+        locale = "en"
+    variables = raw.get("variables", {})
+    if not isinstance(variables, dict):
+        variables = {}
+    # JSON 只允许字符串键；过滤掉非字符串键并保留 JSON 标量值
+    clean_vars: dict = {}
+    for k, v in variables.items():
+        if not isinstance(k, str) or not k:
+            continue
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            clean_vars[k] = v
+    sid = raw.get("id")
+    if sid is not None:
+        sid = str(sid)
+    return {
+        "id": sid,
+        "name": name,
+        "locale": locale.strip(),
+        "variables": clean_vars,
+    }, None
+
+
+def run_regression(template: str, scenarios: list) -> dict:
+    """对多组（locale, 变量）场景批量调用 analyze 并合并路径覆盖。
+
+    单个场景失败（参数非法或分析异常）时保留错误信息并继续其余场景。
+    返回结构：
+      scenarios: 每个场景的输入快照 + 错误 + 该场景各路径覆盖情况（key 索引）
+      merged:    路径并集（保持首次出现顺序），标注 covered 与覆盖来源
+      summary:   总路径、已覆盖/未覆盖、成功/失败场景数等汇总
+    """
+    results: list[dict] = []
+    merged_order: list[str] = []
+    merged_map: dict[str, dict] = {}
+    succeeded = 0
+    failed = 0
+
+    for idx, raw in enumerate(scenarios):
+        scenario, norm_error = _normalize_scenario(raw, idx)
+        if norm_error is not None:
+            results.append({
+                "id": str(raw.get("id")) if isinstance(raw, dict) and
+                raw.get("id") is not None else None,
+                "name": f"场景 {idx + 1}",
+                "locale": None,
+                "variables": {},
+                "error": norm_error,
+                "paths": [],
+                "stats": None,
+            })
+            failed += 1
+            continue
+
+        entry = {
+            "id": scenario["id"],
+            "name": scenario["name"],
+            "locale": scenario["locale"],
+            "variables": scenario["variables"],
+            "error": None,
+            "paths": [],
+            "stats": None,
+        }
+        try:
+            r = analyze(template, scenario["locale"], scenario["variables"])
+        except Exception as exc:  # 单个场景失败不影响其他场景
+            entry["error"] = f"分析失败：{exc.__class__.__name__}: {exc}"
+            results.append(entry)
+            failed += 1
+            continue
+
+        # analyze 返回错误（含模板解析错误）同样视为该场景失败，保留错误明细
+        entry["errors"] = r.get("errors", [])
+        entry["warnings"] = r.get("warnings", [])
+        entry["main"] = r.get("main")
+        st = r.get("stats") or {}
+        entry["stats"] = {
+            "total_paths": st.get("total_paths", 0),
+            "shown_paths": st.get("shown_paths", 0),
+            "covered_paths": st.get("covered_paths", 0),
+            "truncated": st.get("truncated", False),
+            "coverage_available": st.get("coverage_available", True),
+        }
+        covered_here: set[str] = set()
+        for p in r.get("paths", []):
+            key = p["key"]
+            if key not in merged_map:
+                merged_map[key] = {
+                    "key": key,
+                    "conditions": p["conditions"],
+                    "output": p["output"],
+                    "covered": False,
+                    "covered_by": [],
+                }
+                merged_order.append(key)
+            entry_paths = entry["paths"]
+            entry_paths.append({"key": key, "covered": bool(p["covered"]),
+                                "output": p["output"]})
+            if p["covered"]:
+                covered_here.add(key)
+        for key in covered_here:
+            mp = merged_map[key]
+            if not mp["covered"]:
+                mp["covered"] = True
+            mp["covered_by"].append(scenario["name"])
+        if not r.get("ok", True):
+            entry["error"] = "; ".join(
+                e.get("message", "模板错误") for e in r.get("errors", [])
+            ) or "模板存在错误"
+            failed += 1
+        else:
+            succeeded += 1
+        results.append(entry)
+
+    merged = [merged_map[k] for k in merged_order]
+    total_paths = len(merged)
+    covered_paths = sum(1 for p in merged if p["covered"])
+    return {
+        "ok": True,
+        "scenarios": results,
+        "merged": merged,
+        "summary": {
+            "scenario_count": len(scenarios),
+            "succeeded": succeeded,
+            "failed": failed,
+            "total_paths": total_paths,
+            "covered_paths": covered_paths,
+            "uncovered_paths": total_paths - covered_paths,
         },
     }

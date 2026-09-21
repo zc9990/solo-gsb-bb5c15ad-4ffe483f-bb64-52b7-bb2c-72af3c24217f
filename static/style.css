@@ -351,3 +351,103 @@ body {
   z-index: 99;
 }
 .toast.show { opacity: 0.95; transform: translateX(-50%) translateY(0); }
+
+/* ---------- 场景集回归 ---------- */
+.regression-panel { grid-column: 1 / -1; }
+.reg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0 12px;
+}
+.reg-summary { color: var(--muted); font-size: 12.5px; }
+
+.scenario-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.scenario-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.2fr) minmax(220px, 3fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+.sc-name {
+  font-weight: 600;
+  font-size: 13px;
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-name-wrap { min-width: 0; }
+.sc-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.sc-vars {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.sc-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.sc-cov { font-family: var(--mono); font-size: 12px; }
+.sc-actions { display: flex; gap: 6px; }
+.sc-del { color: var(--error); }
+.badge-error { background: var(--error-soft); color: var(--error); border: 1px solid #fecaca; }
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: #374151;
+  background: #f1f3f7;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.merged-conds { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
+.sc-covered-by { font-size: 11.5px; color: var(--ok); }
+.path-card.clickable { cursor: pointer; }
+.path-card.clickable:hover { box-shadow: 0 0 0 2px #fde68a; }
+
+@keyframes path-flash {
+  0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); background: #fffbeb; }
+  30% { box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.65); background: #fef3c7; }
+  100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+.flash { animation: path-flash 1.4s ease-out; }
+
+@media (max-width: 960px) {
+  .scenario-row { grid-template-columns: 1fr; }
+}

@@ -84,6 +84,34 @@
       </div>
       <div id="paths" class="paths"></div>
     </section>
+
+    <!-- 场景集回归面板 -->
+    <section class="panel regression-panel">
+      <div class="panel-head">
+        <h2>场景集回归</h2>
+        <span class="hint">为当前模板保存多组带名称的 locale 与变量样例，批量分析并合并路径覆盖（保存在浏览器本地）</span>
+      </div>
+      <div class="reg-toolbar">
+        <button id="btnSaveScenario" class="btn btn-outline"
+                title="把当前 locale 与变量样例保存为一个场景">＋ 保存当前为场景</button>
+        <button id="btnRunRegression" class="btn"
+                title="对全部场景批量调用分析接口并合并覆盖状态">运行全部场景</button>
+        <button id="btnExportRegression" class="btn btn-outline"
+                title="导出包含场景定义、逐场景结果与汇总的 JSON">导出回归 JSON</button>
+        <span id="regSummary" class="reg-summary"></span>
+      </div>
+      <div id="scenarioList" class="scenario-list"></div>
+
+      <div class="panel-head">
+        <h2>合并路径覆盖</h2>
+        <span id="mergedStats" class="hint"></span>
+      </div>
+      <div class="filter-row">
+        <label class="filter-chip"><input type="checkbox" id="chkOnlyUncovered"> 仅看未覆盖</label>
+        <span class="hint">点击未覆盖路径可在上方定位其触发条件</span>
+      </div>
+      <div id="mergedPaths" class="paths"></div>
+    </section>
   </main>
 
   <div id="toast" class="toast"></div>

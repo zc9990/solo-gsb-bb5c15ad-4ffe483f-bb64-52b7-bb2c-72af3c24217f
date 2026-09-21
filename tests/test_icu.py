@@ -3,7 +3,7 @@ import pytest
 
 from icu import (
     Parser, RenderCtx, analyze, plural_category, render_message,
-    representative_for_category,
+    representative_for_category, run_regression,
 )
 
 
@@ -290,3 +290,104 @@ def test_representative_excludes_explicit():
     # en 的 one 只有 1；排除 1 后无代表值
     assert representative_for_category("en", "one", False, {1.0}) is None
     assert representative_for_category("en", "one", False, set()) == 1
+
+
+# ---------------- 路径稳定标识 ----------------
+
+def test_path_keys_stable_and_unique():
+    r = analyze(SAMPLE, "en", {"gender": "female", "count": 3})
+    keys = [p["key"] for p in r["paths"]]
+    assert len(keys) == len(set(keys))  # 模板内唯一
+    assert all(keys)                    # 非空
+    # 同模板不同变量，key 集合一致
+    r2 = analyze(SAMPLE, "en", {"gender": "male", "count": 1})
+    assert set(keys) == {p["key"] for p in r2["paths"]}
+    # key 中包含两个分支节点（n1/n2）
+    assert all(k.count("|") == 1 for k in keys)
+
+
+# ---------------- 场景集回归 ----------------
+
+REG_TEMPLATE = ("{gender, select, male{He} female{She} other{They}} has "
+                "{count, plural, =0{no messages} one{# message} other{# messages}}.")
+
+
+def test_regression_merges_coverage_across_scenarios():
+    scenarios = [
+        {"id": "a", "name": "female-3", "locale": "en",
+         "variables": {"gender": "female", "count": 3}},
+        {"id": "b", "name": "male-0", "locale": "en",
+         "variables": {"gender": "male", "count": 0}},
+    ]
+    reg = run_regression(REG_TEMPLATE, scenarios)
+    assert reg["summary"]["scenario_count"] == 2
+    assert reg["summary"]["succeeded"] == 2
+    assert reg["summary"]["failed"] == 0
+    # 3 × 3 = 9 条路径，两个场景各覆盖 1 条 → 合并覆盖 2 条
+    assert reg["summary"]["total_paths"] == 9
+    assert reg["summary"]["covered_paths"] == 2
+    assert reg["summary"]["uncovered_paths"] == 7
+    covered = [p for p in reg["merged"] if p["covered"]]
+    assert {tuple(p["covered_by"]) for p in covered} == {
+        ("female-3",), ("male-0",)}
+    outputs = {p["output"].replace("3.0", "3") for p in covered}
+    assert "She has 3 messages." in outputs
+    assert "He has no messages." in outputs
+
+
+def test_regression_keeps_error_and_continues():
+    # 模板对 count 需要数字：字符串值会产生错误；其余场景正常
+    scenarios = [
+        {"id": "bad", "name": "bad-type", "locale": "en",
+         "variables": {"gender": "male", "count": "not-a-number"}},
+        {"id": "ok", "name": "good", "locale": "en",
+         "variables": {"gender": "female", "count": 1}},
+        "garbage",  # 非法场景定义
+    ]
+    reg = run_regression(REG_TEMPLATE, scenarios)
+    assert reg["summary"]["scenario_count"] == 3
+    assert reg["summary"]["failed"] == 2
+    assert reg["summary"]["succeeded"] == 1
+    by_id = {s["id"]: s for s in reg["scenarios"]}
+    assert by_id["bad"]["error"]
+    assert by_id["ok"]["error"] is None
+    # 失败场景未阻断成功场景的合并结果
+    assert reg["summary"]["covered_paths"] == 1
+
+
+def test_regression_scenarios_normalized():
+    # 缺名称 / 缺 locale / 变量类型不合法时自动归一化
+    reg = run_regression(REG_TEMPLATE, [{"variables": {"gender": "x", "count": 1}}])
+    entry = reg["scenarios"][0]
+    assert entry["name"]
+    assert entry["locale"] == "en"
+    assert entry["error"] is None
+
+
+def test_regression_paths_carry_key_for_each_scenario():
+    reg = run_regression(REG_TEMPLATE, [
+        {"id": "a", "name": "a", "locale": "en",
+         "variables": {"gender": "male", "count": 1}},
+    ])
+    keys = {p["key"] for p in reg["scenarios"][0]["paths"]}
+    assert keys == {p["key"] for p in reg["merged"]}
+
+
+def test_regression_locale_changes_path_union():
+    # zh 下 one 不可达，路径数少于 en；合并视图按并集展示
+    tpl = "{n, plural, one{# 条} other{# 条}}"
+    reg = run_regression(tpl, [
+        {"id": "en", "name": "en", "locale": "en", "variables": {"n": 1}},
+        {"id": "zh", "name": "zh", "locale": "zh-Hans", "variables": {"n": 1}},
+    ])
+    assert reg["summary"]["succeeded"] == 2
+    assert reg["summary"]["total_paths"] == 2  # en: one+other，zh 仅 other
+
+
+def test_regression_template_parse_error_is_per_scenario():
+    reg = run_regression("{n, plural, one{a}", [
+        {"id": "a", "name": "a", "locale": "en", "variables": {}},
+    ])
+    assert reg["summary"]["failed"] == 1
+    assert reg["scenarios"][0]["error"]
+    assert reg["scenarios"][0]["errors"]
