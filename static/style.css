@@ -351,3 +351,136 @@ body {
   z-index: 99;
 }
 .toast.show { opacity: 0.95; transform: translateX(-50%) translateY(0); }
+
+/* ---------- 场景集回归 ---------- */
+.scenario-panel {
+  max-width: 1500px;
+  margin: 0 auto 40px;
+  padding: 0 24px;
+}
+.scenario-title-row {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 0 0;
+  border-bottom: 1px solid var(--border);
+  margin: 0;
+  padding: 14px 18px;
+  align-items: center;
+}
+.scenario-title-row h2 { font-size: 15px; }
+.scenario-title-row .hint { flex: 1; }
+.scenario-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scenario-grid {
+  display: grid;
+  grid-template-columns: minmax(340px, 5fr) minmax(420px, 6fr);
+  gap: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  padding: 8px 18px 16px;
+}
+@media (max-width: 960px) {
+  .scenario-grid { grid-template-columns: 1fr; }
+  .scenario-title-row { flex-direction: column; align-items: flex-start; }
+}
+.scenario-col { min-width: 0; }
+.scenario-col h3 { font-size: 13.5px; margin: 0; }
+
+.scenario-list { display: flex; flex-direction: column; gap: 8px; }
+.scenario-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fbfcfe;
+}
+.scenario-row-head { display: flex; align-items: center; gap: 8px; }
+.scenario-name {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  background: transparent;
+}
+.scenario-name:hover { border-color: var(--border); }
+.scenario-name:focus { outline: none; border-color: var(--accent); background: #fff; }
+.scenario-meta {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 8px;
+  word-break: break-word;
+}
+.scenario-meta code { font-size: 11px; }
+.scenario-error {
+  margin: 4px 8px;
+  font-size: 12px;
+  color: var(--error);
+  background: var(--error-soft);
+  border-radius: 6px;
+  padding: 4px 8px;
+  word-break: break-word;
+}
+.scenario-row-actions { display: flex; gap: 6px; padding: 4px 8px 0; }
+.sc-btn-del { color: var(--error); border-color: #fecaca; }
+.sc-btn-del:hover { background: var(--error-soft); }
+
+.sc-status {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 1px 8px;
+}
+.sc-idle { background: #f3f4f6; color: #6b7280; border: 1px solid var(--border); }
+.sc-running { background: #eff4ff; color: var(--accent); border: 1px solid #bfd3ff; }
+.sc-passed { background: var(--ok-soft); color: var(--ok); border: 1px solid #bbf7d0; }
+.sc-failed { background: var(--error-soft); color: var(--error); border: 1px solid #fecaca; }
+
+.scenario-progress {
+  height: 8px;
+  background: #f1f3f7;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 4px 0 10px;
+}
+.scenario-progress-bar {
+  height: 100%;
+  width: 0;
+  background: #f59e0b;
+  border-radius: 6px;
+  transition: width 0.3s ease;
+}
+.scenario-progress-bar.done { background: var(--ok); }
+
+.scenario-paths { display: flex; flex-direction: column; gap: 6px; }
+.spath-card {
+  border: 1px solid var(--border);
+  border-left: 4px solid #f59e0b;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fffdf7;
+}
+.spath-card.covered { border-left-color: var(--ok); background: #fbfefb; }
+.spath-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.spath-card.uncovered .spath-head { cursor: pointer; }
+.spath-card.uncovered .spath-head:hover .spath-by { text-decoration: underline; }
+.spath-id { font-family: var(--mono); color: var(--muted); font-size: 11px; }
+.spath-by { color: var(--muted); font-size: 12px; }
+.spath-card.covered .spath-by { color: var(--ok); }
+.spath-conds { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.spath-conds .chip { font-size: 11px; padding: 1px 8px; }
+
+@keyframes pathFlash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); background: inherit; }
+  30% { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.45); background: var(--accent-soft); }
+}
+.path-flash { animation: pathFlash 1.4s ease; border-radius: 8px; }

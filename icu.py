@@ -224,9 +224,10 @@ def representative_for_category(locale: str, category: str, ordinal: bool,
 def format_number(value, locale: str, style: str | None = None) -> str:
     if HAS_BABEL:
         try:
+            babel_locale = (locale or "en").replace("-", "_")
             if style == "percent":
-                return _babel_percent(value, locale=locale)
-            return _babel_decimal(value, locale=locale)
+                return _babel_percent(value, locale=babel_locale)
+            return _babel_decimal(value, locale=babel_locale)
         except Exception:
             pass
     return str(value)
@@ -825,7 +826,9 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
                prefer: dict | None = None):
     """枚举所有可达分支路径。
 
-    每条路径为 (conditions:list[str], variables:dict)。
+    每条路径为 (conditions:list[str], variables:dict, routes:list[tuple])，
+    routes 为按访问顺序排列的 (node_id, selector)，可作为跨分析调用
+    （如场景集回归）合并同一条路径的稳定标识。
     同一变量在多个分支节点间共享取值，保证路径自洽。
     prefer 中的样例值若能触发目标分支，则优先用作该分支的代表值
     （这样被样例覆盖的路径会用真实样例值渲染）。
@@ -833,7 +836,7 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
     prefer = prefer or {}
     results = []
 
-    def rec(frag: list, assigned: dict, conds: list):
+    def rec(frag: list, assigned: dict, conds: list, routes: list):
         if len(results) >= limit:
             return
         idx = -1
@@ -844,7 +847,7 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
                 node = item
                 break
         if node is None:
-            results.append((conds, assigned))
+            results.append((conds, assigned, routes))
             return
         rest = frag[idx + 1:]
         name = node.name
@@ -861,7 +864,8 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
             else:
                 branch = route_select(node, _str_value(v))
             if branch is not None:
-                rec(branch.message + rest, assigned, conds)
+                rec(branch.message + rest, assigned, conds,
+                    routes + [(node.node_id, branch.selector)])
             return
         for b in node.branches:
             use_prefer = name in prefer and \
@@ -873,10 +877,16 @@ def iter_paths(parts: list, base_vars: dict, locale: str, limit: int,
                 continue
             new_assigned = dict(assigned)
             new_assigned[name] = rep
-            rec(b.message + rest, new_assigned, conds + [cond])
+            rec(b.message + rest, new_assigned, conds + [cond],
+                routes + [(node.node_id, b.selector)])
 
-    rec(parts, dict(base_vars), [])
+    rec(parts, dict(base_vars), [], [])
     return results
+
+
+def path_key(routes: list[tuple[str, str]]) -> str:
+    """把路径的节点路由序列化为稳定标识，如 'n1:female/n2:=0'。"""
+    return "/".join(f"{node_id}:{selector}" for node_id, selector in routes)
 
 
 def count_paths(parts: list, base_vars: dict, locale: str, cap: int = 10000) -> tuple[int, bool]:
@@ -959,7 +969,7 @@ def analyze(template: str, locale: str, variables: dict) -> dict:
     total, capped = count_paths(parts, {}, locale, cap=10000)
     truncated = total > MAX_PATHS
     paths = []
-    for conds, assigned in iter_paths(parts, {}, locale, MAX_PATHS, prefer=variables):
+    for conds, assigned, routes in iter_paths(parts, {}, locale, MAX_PATHS, prefer=variables):
         render_vars = dict(variables)
         render_vars.update(assigned)
         pctx = RenderCtx(render_vars, locale)
@@ -967,6 +977,7 @@ def analyze(template: str, locale: str, variables: dict) -> dict:
         covered = (not ctx.incomplete) and pctx.taken == ctx.taken
         paths.append({
             "id": len(paths) + 1,
+            "key": path_key(routes),
             "conditions": conds,
             "output": output,
             "covered": covered,
@@ -995,4 +1006,127 @@ def analyze(template: str, locale: str, variables: dict) -> dict:
             "max_paths": MAX_PATHS,
             "coverage_available": not ctx.incomplete,
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 场景集回归：批量分析并合并路径覆盖状态
+# ---------------------------------------------------------------------------
+
+MAX_SCENARIOS = 50
+
+
+def merge_scenario_results(results: list[dict]) -> dict:
+    """合并多个 analyze() 结果中每条可达路径的覆盖状态。
+
+    路径以 path key（节点路由序列）对齐：任一场景覆盖过该路径即视为已覆盖。
+    """
+    merged: dict[str, dict] = {}
+    order = 0
+    for r in results:
+        if not r:
+            continue
+        for p in r.get("paths", []):
+            key = p.get("key")
+            if not key:
+                continue
+            item = merged.get(key)
+            if item is None:
+                order += 1
+                item = {
+                    "id": order,
+                    "key": key,
+                    "conditions": list(p.get("conditions", [])),
+                    "outputs": {},
+                    "covered": False,
+                    "covered_by": [],
+                }
+                merged[key] = item
+            if p.get("covered"):
+                item["covered"] = True
+    return merged
+
+
+def run_scenarios(template: str, scenarios: list[dict]) -> dict:
+    """对同一份模板批量运行多组 (name, locale, variables) 场景。
+
+    单个场景失败（变量/locale 类型错误、模板语法错误、内部异常等）时
+    保留错误信息并继续其余场景。返回各场景结果与合并后的路径覆盖汇总。
+    """
+    out_scenarios: list[dict] = []
+    ok_results: list[dict] = []
+
+    for idx, sc in enumerate(scenarios):
+        name = sc.get("name") or f"场景 {idx + 1}"
+        locale = sc.get("locale", "en")
+        variables = sc.get("variables", {})
+        entry: dict = {"id": sc.get("id", idx + 1), "name": name,
+                       "locale": locale, "ok": False}
+        if not isinstance(locale, str) or not locale.strip():
+            entry["status"] = "failed"
+            entry["error"] = "locale 必须是非空字符串"
+            out_scenarios.append(entry)
+            continue
+        if not isinstance(variables, dict):
+            entry["status"] = "failed"
+            entry["error"] = "variables 必须是对象"
+            out_scenarios.append(entry)
+            continue
+        try:
+            r = analyze(template, locale, variables)
+        except Exception as exc:  # 单场景内部异常不应中断整批回归
+            entry["status"] = "failed"
+            entry["error"] = f"分析失败：{exc}"
+            out_scenarios.append(entry)
+            continue
+        if r.get("ok"):
+            entry["status"] = "passed"
+            ok_results.append(r)
+        else:
+            entry["status"] = "failed"
+            errs = r.get("errors") or []
+            entry["error"] = "；".join(e.get("message", "") for e in errs) or "模板存在错误"
+            # 模板有错误时路径不可信，不参与合并
+        entry["result"] = r
+        out_scenarios.append(entry)
+
+    merged = merge_scenario_results(ok_results)
+    paths = list(merged.values())
+    # 附带每个通过场景在该路径上的渲染输出（便于导出核查）
+    for entry in out_scenarios:
+        if entry["status"] != "passed":
+            continue
+        r = entry.get("result")
+        if not r:
+            continue
+        for p in r.get("paths", []):
+            item = merged.get(p.get("key"))
+            if item is not None:
+                item["outputs"][str(entry["id"])] = p.get("output", "")
+                if p.get("covered"):
+                    item["covered_by"].append({"id": entry["id"],
+                                               "name": entry["name"]})
+
+    failed = [s for s in out_scenarios if s["status"] == "failed"]
+    passed = len(out_scenarios) - len(failed)
+    total_paths = len(paths)
+    covered_paths = sum(1 for p in paths if p["covered"])
+    truncated = any(
+        s.get("result") and s["result"].get("stats", {}).get("truncated")
+        for s in out_scenarios
+    )
+    return {
+        "ok": True,
+        "summary": {
+            "total_scenarios": len(out_scenarios),
+            "passed_scenarios": passed,
+            "failed_scenarios": len(failed),
+            "total_paths": total_paths,
+            "covered_paths": covered_paths,
+            "uncovered_paths": total_paths - covered_paths,
+            "all_paths_covered": total_paths > 0 and covered_paths == total_paths,
+            "truncated": truncated,
+        },
+        "scenarios": out_scenarios,
+        "paths": paths,
     }

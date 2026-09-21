@@ -3,10 +3,10 @@ import os
 
 from flask import Flask, jsonify, render_template, request
 
-from icu import analyze
+from icu import MAX_SCENARIOS, analyze, run_scenarios
 
 app = Flask(__name__)
-app.config["JSON_AS_ASCII"] = False  # 响应中保留中文
+app.json.ensure_ascii = False  # 响应中保留中文
 
 
 @app.get("/")
@@ -27,6 +27,34 @@ def preview():
     if not isinstance(variables, dict):
         variables = {}
     return jsonify(analyze(template, locale, variables))
+
+
+@app.post("/api/scenarios/run")
+def scenarios_run():
+    """场景集回归：批量分析同一模板下的多组 locale/变量并合并路径覆盖。"""
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+    template = data.get("template", "")
+    scenarios = data.get("scenarios", [])
+    if not isinstance(template, str):
+        return jsonify({"ok": False, "error": "template 必须是字符串"}), 400
+    if not isinstance(scenarios, list):
+        return jsonify({"ok": False, "error": "scenarios 必须是数组"}), 400
+    if len(scenarios) > MAX_SCENARIOS:
+        return jsonify({"ok": False,
+                        "error": f"单次最多运行 {MAX_SCENARIOS} 个场景"}), 400
+    norm = []
+    for sc in scenarios:
+        if not isinstance(sc, dict):
+            return jsonify({"ok": False, "error": "每个场景必须是对象"}), 400
+        norm.append({
+            "id": sc.get("id"),
+            "name": str(sc.get("name") or ""),
+            "locale": sc.get("locale", "en"),
+            "variables": sc.get("variables", {}),
+        })
+    return jsonify(run_scenarios(template, norm))
 
 
 @app.get("/api/health")

@@ -86,6 +86,44 @@
     </section>
   </main>
 
+  <!-- 场景集回归面板 -->
+  <section class="scenario-panel">
+    <div class="panel-head scenario-title-row">
+      <h2>场景集回归</h2>
+      <span class="hint">为当前模板保存多组带名称的 locale 与变量样例，一键批量分析并合并每条可达路径的覆盖状态（保存在浏览器本地）</span>
+      <div class="scenario-actions">
+        <button id="btnAddScenario" class="btn btn-outline">＋ 保存当前为场景</button>
+        <button id="btnRunScenarios" class="btn">▶ 运行全部场景</button>
+        <button id="btnExportScenarios" class="btn btn-outline"
+                title="导出包含场景定义与汇总结果的 JSON">导出场景 JSON</button>
+      </div>
+    </div>
+
+    <div class="scenario-grid">
+      <!-- 左：场景列表 -->
+      <div class="scenario-col">
+        <div class="panel-head">
+          <h3>场景列表 <span id="scenarioCount" class="hint"></span></h3>
+        </div>
+        <div id="scenarioList" class="scenario-list"></div>
+      </div>
+
+      <!-- 右：合并覆盖 -->
+      <div class="scenario-col">
+        <div class="panel-head">
+          <h3>合并路径覆盖</h3>
+          <span id="scenarioSummary" class="hint"></span>
+        </div>
+        <div id="scenarioProgress" class="scenario-progress" hidden>
+          <div id="scenarioProgressBar" class="scenario-progress-bar"></div>
+        </div>
+        <div id="scenarioPaths" class="scenario-paths">
+          <div class="empty">尚未运行场景集。保存场景后点击「运行全部场景」。</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <div id="toast" class="toast"></div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

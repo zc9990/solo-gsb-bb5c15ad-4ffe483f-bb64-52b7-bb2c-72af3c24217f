@@ -276,6 +276,7 @@
     (result.paths || []).forEach(function (p) {
       var card = document.createElement("div");
       card.className = "path-card" + (p.covered ? "" : " uncovered");
+      card.setAttribute("data-key", p.key || "");
       var head = document.createElement("div");
       head.className = "path-head";
       var idSpan = document.createElement("span");
@@ -388,10 +389,437 @@
     toast("已导出 JSON");
   });
 
+  /* ---------------- 场景集回归 ---------------- */
+
+  var STORAGE_KEY = "icu-preview-scenarios-v1";
+  var scenarioListEl = document.getElementById("scenarioList");
+  var scenarioCountEl = document.getElementById("scenarioCount");
+  var scenarioSummaryEl = document.getElementById("scenarioSummary");
+  var scenarioPathsEl = document.getElementById("scenarioPaths");
+  var scenarioProgressEl = document.getElementById("scenarioProgress");
+  var scenarioProgressBarEl = document.getElementById("scenarioProgressBar");
+
+  var scenarios = [];          // [{id, name, locale, variables}]
+  var scenarioStatus = {};     // id -> "running" | "passed" | "failed"
+  var scenarioErrors = {};     // id -> 错误信息
+  var scenarioResults = {};    // id -> 最近一次成功的 analyze 结果
+  var lastMerge = null;        // 最近一次合并响应（scenarios / summary / paths）
+  var bindKey = tpl.value;     // 当前场景列表绑定的模板
+  var rebindTimer = null;
+  var scenarioSeq = 1;
+
+  function loadStore() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) { return {}; }
+  }
+
+  function saveStore() {
+    try {
+      var store = loadStore();
+      store[bindKey] = {
+        template: bindKey,
+        scenarios: scenarios,
+        saved_at: new Date().toISOString(),
+      };
+      // 最多保留 20 份模板的场景集，超出删除最旧的
+      var keys = Object.keys(store).sort(function (a, b) {
+        return String(store[a].saved_at || "").localeCompare(store[b].saved_at || "");
+      });
+      while (keys.length > 20) { delete store[keys.shift()]; }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    } catch (e) { /* 本地存储不可用时静默降级 */ }
+  }
+
+  function resetScenarioRuntime() {
+    scenarioStatus = {};
+    scenarioErrors = {};
+    scenarioResults = {};
+    lastMerge = null;
+  }
+
+  function bindTemplate(key) {
+    saveStore();  // 保存上一份模板的场景
+    bindKey = key;
+    var entry = loadStore()[key];
+    scenarios = entry && entry.scenarios ? entry.scenarios.slice() : [];
+    scenarioSeq = scenarios.reduce(function (m, s) {
+      return Math.max(m, parseInt(String(s.id).replace(/^s/, ""), 10) || 0);
+    }, 0) + 1;
+    resetScenarioRuntime();
+    renderScenarios();
+    renderMerge();
+  }
+
+  function scheduleRebind() {
+    clearTimeout(rebindTimer);
+    rebindTimer = setTimeout(function () {
+      if (tpl.value !== bindKey) bindTemplate(tpl.value);
+    }, 500);
+  }
+
+  tpl.addEventListener("input", scheduleRebind);
+
+  function addScenario() {
+    var vars = collectVariables();
+    var n = scenarios.length + 1;
+    var sc = {
+      id: "s" + scenarioSeq++,
+      name: "场景 " + n,
+      locale: localeInput.value.trim() || "en",
+      variables: vars,
+    };
+    scenarios.push(sc);
+    saveStore();
+    renderScenarios();
+    toast("已保存当前 locale 与变量为场景");
+  }
+
+  function removeScenario(id) {
+    scenarios = scenarios.filter(function (s) { return s.id !== id; });
+    delete scenarioStatus[id];
+    delete scenarioErrors[id];
+    delete scenarioResults[id];
+    saveStore();
+    rebuildMerge();
+    renderScenarios();
+  }
+
+  function loadScenarioIntoEditor(sc) {
+    localeInput.value = sc.locale || "en";
+    varRowsEl.innerHTML = "";
+    Object.keys(sc.variables || {}).forEach(function (name) {
+      var v = sc.variables[name];
+      addVarRow(name, v === undefined || v === null ? "" : String(v));
+    });
+    scheduleAnalyze();
+    toast("已载入「" + sc.name + "」到编辑器");
+  }
+
+  function statusBadge(status) {
+    if (status === "running") return '<span class="sc-status sc-running">运行中…</span>';
+    if (status === "passed") return '<span class="sc-status sc-passed">通过</span>';
+    if (status === "failed") return '<span class="sc-status sc-failed">失败</span>';
+    return '<span class="sc-status sc-idle">未运行</span>';
+  }
+
+  function renderScenarios() {
+    scenarioCountEl.textContent = scenarios.length ? "（" + scenarios.length + "）" : "";
+    scenarioListEl.innerHTML = "";
+    if (!scenarios.length) {
+      scenarioListEl.innerHTML =
+        '<div class="empty">还没有场景。调好左侧的 locale 与变量后，点「保存当前为场景」。</div>';
+      return;
+    }
+    scenarios.forEach(function (sc) {
+      var row = document.createElement("div");
+      row.className = "scenario-row";
+
+      var head = document.createElement("div");
+      head.className = "scenario-row-head";
+      var nameInput = document.createElement("input");
+      nameInput.className = "scenario-name";
+      nameInput.value = sc.name || "";
+      nameInput.title = "场景名称";
+      nameInput.addEventListener("change", function () {
+        sc.name = nameInput.value.trim() || ("场景 " + sc.id);
+        nameInput.value = sc.name;
+        saveStore();
+        rebuildMerge();
+      });
+      head.appendChild(nameInput);
+      var badgeWrap = document.createElement("span");
+      badgeWrap.innerHTML = statusBadge(scenarioStatus[sc.id]);
+      head.appendChild(badgeWrap);
+      row.appendChild(head);
+
+      var meta = document.createElement("div");
+      meta.className = "scenario-meta";
+      var varText = Object.keys(sc.variables || {})
+        .map(function (k) { return k + "=" + JSON.stringify(sc.variables[k]); })
+        .join(", ");
+      meta.innerHTML = '<code>' + esc(sc.locale || "en") + "</code> " +
+        esc(varText || "（无变量）");
+      row.appendChild(meta);
+
+      if (scenarioStatus[sc.id] === "failed" && scenarioErrors[sc.id]) {
+        var err = document.createElement("div");
+        err.className = "scenario-error";
+        err.textContent = "✕ " + scenarioErrors[sc.id];
+        row.appendChild(err);
+      }
+
+      var actions = document.createElement("div");
+      actions.className = "scenario-row-actions";
+      [
+        { label: "载入", title: "把该场景的 locale 与变量载入编辑器", fn: function () { loadScenarioIntoEditor(sc); } },
+        { label: "重跑", title: "仅重新运行该场景并更新合并结果", fn: function () { runScenarios([sc], false); } },
+        { label: "删除", title: "删除该场景", cls: "sc-btn-del", fn: function () { removeScenario(sc.id); } },
+      ].forEach(function (b) {
+        var btn = document.createElement("button");
+        btn.className = "btn btn-small" + (b.cls ? " " + b.cls : "");
+        btn.textContent = b.label;
+        btn.title = b.title;
+        btn.addEventListener("click", b.fn);
+        actions.appendChild(btn);
+      });
+      row.appendChild(actions);
+      scenarioListEl.appendChild(row);
+    });
+  }
+
+  /* 调用后端批量接口；单个场景失败由后端保留错误并继续其他场景。
+     full=false（单场景重跑）时，合并结果用本地全部场景缓存重建。 */
+  function runScenarios(list, full) {
+    if (!list || !list.length) {
+      toast("请先保存至少一个场景");
+      return Promise.resolve(null);
+    }
+    list.forEach(function (sc) { scenarioStatus[sc.id] = "running"; });
+    renderScenarios();
+    return fetch("/api/scenarios/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        template: tpl.value,
+        scenarios: list.map(function (sc) {
+          return { id: sc.id, name: sc.name, locale: sc.locale, variables: sc.variables };
+        }),
+      }),
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || "请求失败"); });
+        return r.json();
+      })
+      .then(function (resp) {
+        // 以本次结果更新各场景状态，并缓存完整 analyze 结果（供重跑后本地重建合并）
+        resp.scenarios.forEach(function (s) {
+          var sc = list.filter(function (x) { return String(x.id) === String(s.id); })[0];
+          if (!sc) return;
+          scenarioStatus[sc.id] = s.status;
+          if (s.status === "failed") {
+            scenarioErrors[sc.id] = s.error || "运行失败";
+            delete scenarioResults[sc.id];
+          } else {
+            delete scenarioErrors[sc.id];
+            if (s.result) scenarioResults[sc.id] = s.result;
+          }
+        });
+        rebuildMerge(full !== false ? resp : null);
+        renderScenarios();
+        return lastMerge;
+      })
+      .catch(function (e) {
+        list.forEach(function (sc) {
+          scenarioStatus[sc.id] = "failed";
+          scenarioErrors[sc.id] = String(e.message || e);
+        });
+        renderScenarios();
+        toast("场景运行失败：" + (e.message || e));
+        return null;
+      });
+  }
+
+  /* 用本地缓存的 analyze 结果重建与后端一致的合并结构 */
+  function rebuildMerge(fresh) {
+    if (fresh && fresh.paths) {
+      lastMerge = fresh;
+    } else if (scenarios.some(function (s) { return scenarioStatus[s.id] === "passed"; })) {
+      lastMerge = mergeFromCache();
+    } else {
+      lastMerge = null;
+    }
+    renderMerge();
+  }
+
+  /* 用本地缓存的 analyze 结果重建与后端一致的合并结构 */
+  function mergeFromCache() {
+    var merged = {};
+    var order = 0;
+    scenarios.forEach(function (sc) {
+      if (scenarioStatus[sc.id] !== "passed") return;
+      var r = scenarioResults[sc.id];
+      if (!r) return;
+      (r.paths || []).forEach(function (p) {
+        var item = merged[p.key];
+        if (!item) {
+          order += 1;
+          item = {
+            id: order, key: p.key, conditions: p.conditions || [],
+            outputs: {}, covered: false, covered_by: [],
+          };
+          merged[p.key] = item;
+        }
+        item.outputs[String(sc.id)] = p.output;
+        if (p.covered) {
+          item.covered = true;
+          item.covered_by.push({ id: sc.id, name: sc.name });
+        }
+      });
+    });
+    var paths = Object.keys(merged).map(function (k) { return merged[k]; });
+    var failed = scenarios.filter(function (s) { return scenarioStatus[s.id] === "failed"; }).length;
+    var total = paths.length;
+    var cov = paths.filter(function (p) { return p.covered; }).length;
+    return {
+      summary: {
+        total_scenarios: scenarios.length,
+        passed_scenarios: scenarios.length - failed,
+        failed_scenarios: failed,
+        total_paths: total,
+        covered_paths: cov,
+        uncovered_paths: total - cov,
+        all_paths_covered: total > 0 && cov === total,
+        truncated: scenarios.some(function (s) {
+          var r = scenarioResults[s.id];
+          return r && r.stats && r.stats.truncated;
+        }),
+      },
+      scenarios: scenarios.map(function (s) {
+        return {
+          id: s.id, name: s.name, locale: s.locale,
+          status: scenarioStatus[s.id], error: scenarioErrors[s.id],
+        };
+      }),
+      paths: paths,
+    };
+  }
+
+  function locatePath(key) {
+    // 定位到右侧「可达分支路径」中的对应卡片并闪烁
+    var card = pathsEl.querySelector('.path-card[data-key="' + cssEsc(key) + '"]');
+    if (card) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.remove("path-flash");
+      void card.offsetWidth;  // 重置动画
+      card.classList.add("path-flash");
+      return;
+    }
+    // 当前样例下该路径未展示（被截断或样例导致列表不同）→ 展开面板提示
+    pathsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    toast("该路径未在当前路径列表中展示，请查看面板中的触发条件");
+  }
+
+  function cssEsc(s) {
+    return String(s).replace(/["\\]/g, "\\$&");
+  }
+
+  function renderMerge() {
+    if (!lastMerge) {
+      scenarioSummaryEl.textContent = "";
+      scenarioProgressEl.hidden = true;
+      scenarioPathsEl.innerHTML =
+        '<div class="empty">尚未运行场景集。保存场景后点击「运行全部场景」。</div>';
+      return;
+    }
+    var sm = lastMerge.summary || {};
+    scenarioSummaryEl.textContent =
+      "共 " + sm.total_paths + " 条路径 · 已覆盖 " + sm.covered_paths +
+      " · 未覆盖 " + sm.uncovered_paths +
+      (sm.truncated ? "（路径过多，部分未枚举）" : "") +
+      "｜场景通过 " + sm.passed_scenarios + "/" + sm.total_scenarios +
+      (sm.failed_scenarios ? "，失败 " + sm.failed_scenarios : "");
+
+    var pct = sm.total_paths ? Math.round(100 * sm.covered_paths / sm.total_paths) : 0;
+    scenarioProgressEl.hidden = false;
+    scenarioProgressBarEl.style.width = pct + "%";
+    scenarioProgressBarEl.className =
+      "scenario-progress-bar" + (sm.all_paths_covered ? " done" : "");
+
+    scenarioPathsEl.innerHTML = "";
+    if (!lastMerge.paths.length) {
+      scenarioPathsEl.innerHTML =
+        '<div class="empty">没有可枚举的路径（场景可能全部失败，或模板不含分支）。</div>';
+      return;
+    }
+    lastMerge.paths.forEach(function (p) {
+      var card = document.createElement("div");
+      card.className = "spath-card" + (p.covered ? " covered" : " uncovered");
+      var head = document.createElement("div");
+      head.className = "spath-head";
+      head.innerHTML = badge(p.covered, true, true) +
+        '<span class="spath-id">#' + p.id + "</span>";
+      if (!p.covered) {
+        head.title = "点击定位到该路径的触发条件";
+        head.addEventListener("click", function () { locatePath(p.key); });
+      }
+      var by = document.createElement("span");
+      by.className = "spath-by";
+      if (p.covered && p.covered_by && p.covered_by.length) {
+        by.textContent = "由 " + p.covered_by.map(function (x) { return x.name; }).join("、") + " 覆盖";
+      } else if (!p.covered) {
+        by.textContent = "未覆盖 — 点击定位触发条件";
+      }
+      head.appendChild(by);
+      card.appendChild(head);
+
+      var conds = document.createElement("div");
+      conds.className = "spath-conds";
+      (p.conditions || []).forEach(function (c) {
+        var chip = document.createElement("span");
+        chip.className = "chip";
+        chip.textContent = c;
+        conds.appendChild(chip);
+      });
+      card.appendChild(conds);
+      scenarioPathsEl.appendChild(card);
+    });
+  }
+
+  function exportScenarios() {
+    if (!scenarios.length) { toast("没有可导出的场景"); return; }
+    var doExport = function (merge) {
+      var data = {
+        tool: "icu-branch-previewer",
+        exported_at: new Date().toISOString(),
+        template: tpl.value,
+        scenarios: scenarios.map(function (sc) {
+          return { name: sc.name, locale: sc.locale, variables: sc.variables };
+        }),
+        summary: merge ? merge.summary : null,
+        scenario_results: merge ? merge.scenarios.map(function (s) {
+          return { name: s.name, locale: s.locale, status: s.status,
+                   error: s.error || null };
+        }) : [],
+        merged_paths: merge ? merge.paths.map(function (p) {
+          return {
+            key: p.key, conditions: p.conditions, covered: p.covered,
+            covered_by: p.covered_by, outputs: p.outputs,
+          };
+        }) : [],
+      };
+      var blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "icu-scenarios.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      toast("已导出场景 JSON");
+    };
+    // 导出前确保汇总结果为最新（运行失败也导出，结果中保留各场景错误）
+    runScenarios(scenarios).then(function (resp) {
+      doExport(resp || (lastMerge ? lastMerge : {
+        summary: null, scenarios: scenarios.map(function (s) {
+          return { name: s.name, locale: s.locale, variables: s.variables,
+                   status: scenarioStatus[s.id], error: scenarioErrors[s.id] };
+        }), paths: [],
+      }));
+    });
+  }
+
+  document.getElementById("btnAddScenario").addEventListener("click", addScenario);
+  document.getElementById("btnRunScenarios")
+    .addEventListener("click", function () { runScenarios(scenarios, true); });
+  document.getElementById("btnExportScenarios").addEventListener("click", exportScenarios);
+
   /* ---------------- 初始化 ---------------- */
 
   tpl.value = DEFAULT_TEMPLATE;
   addVarRow("gender", "female");
   addVarRow("count", "3");
+  bindTemplate(tpl.value);
   analyze();
 })();

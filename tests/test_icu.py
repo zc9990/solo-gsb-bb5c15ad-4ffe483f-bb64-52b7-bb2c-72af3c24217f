@@ -2,8 +2,8 @@
 import pytest
 
 from icu import (
-    Parser, RenderCtx, analyze, plural_category, render_message,
-    representative_for_category,
+    Parser, RenderCtx, analyze, path_key, plural_category, render_message,
+    representative_for_category, run_scenarios,
 )
 
 
@@ -286,7 +286,112 @@ def test_ordinal_category():
     assert plural_category("en", 11, ordinal=True) == "other"
 
 
+def test_hash_formatting_hyphenated_locale():
+    # zh-Hans（连字符形式）应能被 Babel 识别，# 输出 1 而非 1.0
+    r = analyze("{n, plural, one{# 条} other{# 条}}", "zh-Hans", {"n": 1})
+    assert r["main"]["output"] == "1 条"
+
+
 def test_representative_excludes_explicit():
     # en 的 one 只有 1；排除 1 后无代表值
     assert representative_for_category("en", "one", False, {1.0}) is None
     assert representative_for_category("en", "one", False, set()) == 1
+
+
+# ---------------- 路径 key ----------------
+
+def test_paths_have_stable_keys():
+    r = analyze(SAMPLE, "en", {"gender": "female", "count": 3})
+    keys = [p["key"] for p in r["paths"]]
+    assert len(keys) == len(set(keys))  # key 唯一
+    female_other = [p for p in r["paths"] if p["covered"]][0]
+    assert female_other["key"] == "n1:female/n2:other"
+    # 同样的模板再次分析，key 稳定一致
+    r2 = analyze(SAMPLE, "en", {"gender": "male", "count": 0})
+    keys2 = {p["key"] for p in r2["paths"]}
+    assert set(keys) == keys2
+
+
+# ---------------- 场景集回归 ----------------
+
+def test_run_scenarios_merges_coverage():
+    res = run_scenarios(SAMPLE, [
+        {"id": "s1", "name": "女性3", "locale": "en",
+         "variables": {"gender": "female", "count": 3}},
+        {"id": "s2", "name": "男性0", "locale": "en",
+         "variables": {"gender": "male", "count": 0}},
+    ])
+    assert res["ok"] is True
+    sm = res["summary"]
+    assert sm["total_scenarios"] == 2
+    assert sm["passed_scenarios"] == 2
+    assert sm["failed_scenarios"] == 0
+    assert sm["total_paths"] == 9
+    assert sm["covered_paths"] == 2
+    assert sm["uncovered_paths"] == 7
+    covered = {p["key"]: p for p in res["paths"] if p["covered"]}
+    assert covered["n1:female/n2:other"]["covered_by"] == [{"id": "s1", "name": "女性3"}]
+    assert covered["n1:male/n2:=0"]["outputs"]["s2"] == "He has no new messages."
+
+
+def test_run_scenarios_failure_is_isolated():
+    # 第 2 个场景非法（locale 类型错误），第 3 个变量类型错误：
+    # 保留错误并继续，其余场景照常合并
+    res = run_scenarios(SAMPLE, [
+        {"id": "s1", "name": "正常", "locale": "en",
+         "variables": {"gender": "female", "count": 3}},
+        {"id": "s2", "name": "坏locale", "locale": 123, "variables": {}},
+        {"id": "s3", "name": "坏变量", "locale": "en",
+         "variables": {"gender": "male", "count": "x"}},
+    ])
+    statuses = {s["id"]: s for s in res["scenarios"]}
+    assert statuses["s1"]["status"] == "passed"
+    assert statuses["s2"]["status"] == "failed"
+    assert "locale" in statuses["s2"]["error"]
+    assert statuses["s3"]["status"] == "failed"
+    assert "需要数字" in statuses["s3"]["error"]
+    assert res["summary"]["passed_scenarios"] == 1
+    assert res["summary"]["failed_scenarios"] == 2
+    # 失败场景不参与合并；正常场景的 1 条覆盖仍保留
+    assert res["summary"]["covered_paths"] == 1
+
+
+def test_run_scenarios_bad_template_marks_all_failed_but_continues():
+    res = run_scenarios("{n, plural, one{a}}", [
+        {"id": "s1", "name": "a", "locale": "en", "variables": {"n": 1}},
+        {"id": "s2", "name": "b", "locale": "ru", "variables": {"n": 2}},
+    ])
+    assert all(s["status"] == "failed" for s in res["scenarios"])
+    assert all(s["error"] for s in res["scenarios"])
+    assert res["summary"]["failed_scenarios"] == 2
+    assert res["summary"]["total_paths"] == 0
+
+
+def test_run_scenarios_default_name_and_locale():
+    res = run_scenarios(SAMPLE, [{"variables": {"gender": "x", "count": 9}}])
+    s = res["scenarios"][0]
+    assert s["name"] == "场景 1"
+    assert s["locale"] == "en"
+    assert s["status"] == "passed"
+
+
+def test_run_scenarios_merges_across_locales():
+    # zh 下 one 不可达；en 场景与 zh 场景的路径取并集
+    tpl = "{n, plural, one{A} other{B}}"
+    res = run_scenarios(tpl, [
+        {"id": "s1", "name": "英文1", "locale": "en", "variables": {"n": 1}},
+        {"id": "s2", "name": "中文1", "locale": "zh-Hans", "variables": {"n": 1}},
+    ])
+    keys = {p["key"] for p in res["paths"]}
+    assert "n1:one" in keys and "n1:other" in keys
+    # 英文 n=1 覆盖 one；中文 n=1 覆盖 other → 两条均被覆盖
+    assert res["summary"]["covered_paths"] == 2
+    assert res["summary"]["uncovered_paths"] == 0
+
+
+def test_run_scenarios_reports_truncation():
+    # 8 个 select × 3 分支 = 6561 条，超过单分析 300 上限
+    tpl = " ".join("{v%d, select, a{x} b{y} other{z}}" % i for i in range(8))
+    res = run_scenarios(tpl, [{"id": "s1", "name": "超大", "locale": "en",
+                               "variables": {}}])
+    assert res["summary"]["truncated"] is True
